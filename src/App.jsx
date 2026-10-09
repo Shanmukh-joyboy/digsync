@@ -47,6 +47,7 @@ export default function App() {
   const [error, setError] = useState('')
   const [session, setSession] = useState(null)
   const [showLogin, setShowLogin] = useState(false)
+  const [showStats, setShowStats] = useState(false)
 
   async function load() {
     const [p, r] = await Promise.all([
@@ -86,14 +87,15 @@ export default function App() {
       <header>
         <h1>🚧 DigOnce <span>Know what's being built on your street</span></h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="chip" onClick={() => { setShowStats(true); setSelected(null); setAdding(false); setShowLogin(false) }}>Stats</button>
           {session ? (
             <>
               <small>{session.user.email}</small>
               <button className="chip" onClick={() => supabase.auth.signOut()}>Logout</button>
-              <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false) }}>+ Add project</button>
+              <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false); setShowStats(false) }}>+ Add project</button>
             </>
           ) : (
-            <button className="primary" onClick={() => { setShowLogin(true); setSelected(null) }}>Department login</button>
+            <button className="primary" onClick={() => { setShowLogin(true); setSelected(null); setShowStats(false) }}>Department login</button>
           )}
         </div>
       </header>
@@ -110,6 +112,8 @@ export default function App() {
           </div>
           {adding ? (
             <AddProject projects={projects} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
+          ) : showStats ? (
+            <Stats projects={projects} reports={reports} onBack={() => setShowStats(false)} />
           ) : showLogin && !session ? (
             <Login onDone={() => setShowLogin(false)} onBack={() => setShowLogin(false)} />
           ) : sel ? (
@@ -139,7 +143,7 @@ export default function App() {
               center={[p.lat, p.lng]}
               radius={selected === p.id ? 14 : 10}
               pathOptions={{ color: isOverdue(p) ? '#991b1b' : '#fff', weight: 3, fillColor: COLORS[p.status], fillOpacity: 0.95 }}
-              eventHandlers={{ click: () => { setSelected(p.id); setAdding(false) } }}
+              eventHandlers={{ click: () => { setSelected(p.id); setAdding(false); setShowStats(false) } }}
             />
           ))}
         </MapContainer>
@@ -299,5 +303,78 @@ function Login({ onDone, onBack }) {
       {err && <div className="error">{err}</div>}
       <button className="primary">Log in</button>
     </form>
+  )
+}
+
+function Bar({ label, value, max }) {
+  return (
+    <div style={{ margin: '6px 0' }}>
+      <small>{label} ({value})</small>
+      <div style={{ background: '#e5e7eb', borderRadius: 4, height: 10 }}>
+        <div style={{ width: `${max ? (value / max) * 100 : 0}%`, background: '#2563eb', height: 10, borderRadius: 4 }} />
+      </div>
+    </div>
+  )
+}
+
+function Stats({ projects, reports, onBack }) {
+  const overdue = projects.filter(isOverdue)
+
+  const byDept = {}
+  overdue.forEach((p) => { byDept[p.department || 'Unassigned'] = (byDept[p.department || 'Unassigned'] || 0) + 1 })
+
+  const counts = {}
+  reports.forEach((r) => { counts[r.project_id] = (counts[r.project_id] || 0) + 1 })
+  const topReported = projects
+    .map((p) => ({ p, n: counts[p.id] || 0 }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 5)
+
+  const avg = projects.length
+    ? Math.round(projects.reduce((s, p) => s + (Number(p.progress) || 0), 0) / projects.length)
+    : 0
+
+  // Coordination conflicts: same rule as the Add-project alert, each pair counted once
+  const conflicts = []
+  projects.forEach((a) => {
+    if (a.status === 'completed') return
+    findConflicts(a, projects.filter((b) => b.id !== a.id)).forEach((b) => {
+      if (String(a.id) < String(b.id)) conflicts.push([a, b])
+    })
+  })
+
+  return (
+    <div className="detail">
+      <button type="button" className="link" onClick={onBack}>← Back</button>
+      <h2>City stats</h2>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '12px 0' }}>
+        <div><b style={{ fontSize: 24 }}>{projects.length}</b><br /><small>Projects</small></div>
+        <div><b style={{ fontSize: 24 }}>{overdue.length}</b><br /><small>Overdue</small></div>
+        <div><b style={{ fontSize: 24 }}>{avg}%</b><br /><small>Avg progress</small></div>
+        <div><b style={{ fontSize: 24 }}>{conflicts.length}</b><br /><small>Coordination conflicts</small></div>
+      </div>
+
+      <h3>Conflicts to coordinate</h3>
+      {conflicts.length === 0 && <p className="muted">No overlapping work found.</p>}
+      {conflicts.map(([a, b]) => (
+        <p key={a.id + '-' + b.id} style={{ margin: '6px 0' }}>
+          <b>{a.title}</b> ({a.department}) and <b>{b.title}</b> ({b.department}) are within 150 m with overlapping dates.
+        </p>
+      ))}
+
+      <h3>Overdue by department</h3>
+      {Object.keys(byDept).length === 0 && <p className="muted">No overdue projects.</p>}
+      {Object.entries(byDept).map(([d, n]) => (
+        <Bar key={d} label={d} value={n} max={Math.max(...Object.values(byDept))} />
+      ))}
+
+      <h3>Most-reported projects</h3>
+      {topReported.length === 0 && <p className="muted">No citizen reports yet.</p>}
+      {topReported.map(({ p, n }) => (
+        <Bar key={p.id} label={p.title} value={n} max={topReported[0].n} />
+      ))}
+    </div>
   )
 }
