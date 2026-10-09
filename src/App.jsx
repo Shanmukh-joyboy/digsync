@@ -45,6 +45,8 @@ export default function App() {
   const [filter, setFilter] = useState('all')
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
+  const [session, setSession] = useState(null)
+  const [showLogin, setShowLogin] = useState(false)
 
   async function load() {
     const [p, r] = await Promise.all([
@@ -54,6 +56,13 @@ export default function App() {
     if (p.error) return setError(p.error.message)
     setProjects(p.data); setReports(r.data || [])
   }
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    return () => sub.subscription.unsubscribe()
+  }, [])
+
   useEffect(() => {
     load()
     const ch = supabase
@@ -76,7 +85,17 @@ export default function App() {
     <div className="app">
       <header>
         <h1>🚧 DigOnce <span>Know what's being built on your street</span></h1>
-        <button className="primary" onClick={() => { setAdding(true); setSelected(null) }}>+ Add project</button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {session ? (
+            <>
+              <small>{session.user.email}</small>
+              <button className="chip" onClick={() => supabase.auth.signOut()}>Logout</button>
+              <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false) }}>+ Add project</button>
+            </>
+          ) : (
+            <button className="primary" onClick={() => { setShowLogin(true); setSelected(null) }}>Department login</button>
+          )}
+        </div>
       </header>
       <div className="stats">
         <b>{stats.total}</b> projects · <b>{stats.ongoing}</b> ongoing · <b className="red">{stats.overdue}</b> overdue · <b>{stats.reports}</b> citizen reports
@@ -91,8 +110,10 @@ export default function App() {
           </div>
           {adding ? (
             <AddProject projects={projects} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
+          ) : showLogin && !session ? (
+            <Login onDone={() => setShowLogin(false)} onBack={() => setShowLogin(false)} />
           ) : sel ? (
-            <Detail project={sel} reports={reports.filter((r) => r.project_id === sel.id)} onBack={() => setSelected(null)} onChange={load} />
+            <Detail canEdit={!!session} project={sel} reports={reports.filter((r) => r.project_id === sel.id)} onBack={() => setSelected(null)} onChange={load} />
           ) : (
             <ul className="list">
               {shown.map((p) => (
@@ -127,7 +148,7 @@ export default function App() {
   )
 }
 
-function Detail({ project: p, reports, onBack, onChange }) {
+function Detail({ project: p, reports, onBack, onChange, canEdit }) {
   const [form, setForm] = useState({ kind: 'delay', message: '', author: '' })
   const [busy, setBusy] = useState(false)
 
@@ -138,12 +159,20 @@ function Detail({ project: p, reports, onBack, onChange }) {
     await supabase.from('reports').insert({ project_id: p.id, ...form })
     setForm({ kind: 'delay', message: '', author: '' }); setBusy(false); onChange()
   }
+
   async function affected(r) {
     await supabase.from('reports').update({ affected: r.affected + 1 }).eq('id', r.id)
     onChange()
   }
+
   async function setStatus(status) {
     await supabase.from('projects').update({ status, progress: status === 'completed' ? 100 : p.progress }).eq('id', p.id)
+    onChange()
+  }
+
+  async function setProgress(v) {
+    const n = Math.min(100, Math.max(0, Number(v) || 0))
+    await supabase.from('projects').update({ progress: n }).eq('id', p.id)
     onChange()
   }
 
@@ -161,12 +190,23 @@ function Detail({ project: p, reports, onBack, onChange }) {
       </dl>
       <div className="bar"><div style={{ width: p.progress + '%', background: COLORS[p.status] }} /></div>
       <small>{p.progress}% complete</small>
-      <div className="filters">
-        <small>Status:</small>
-        {Object.keys(COLORS).map((s) => (
-          <button key={s} className={p.status === s ? 'chip on' : 'chip'} onClick={() => setStatus(s)}>{s}</button>
-        ))}
-      </div>
+
+      {canEdit ? (
+        <>
+          <div className="filters">
+            <small>Status:</small>
+            {Object.keys(COLORS).map((s) => (
+              <button key={s} className={p.status === s ? 'chip on' : 'chip'} onClick={() => setStatus(s)}>{s}</button>
+            ))}
+          </div>
+          <label>Progress %
+            <input type="number" min="0" max="100" defaultValue={p.progress}
+              key={p.id + '-' + p.progress} onBlur={(e) => setProgress(e.target.value)} />
+          </label>
+        </>
+      ) : (
+        <p className="muted">Status: <b>{p.status}</b>. Only department accounts can update it.</p>
+      )}
 
       <h3>Citizen reports</h3>
       <form onSubmit={submit} className="form">
@@ -234,6 +274,30 @@ function AddProject({ projects, onClose, onSaved }) {
       )}
       {err && <div className="error">{err}</div>}
       <button className="primary">Save project</button>
+    </form>
+  )
+}
+
+function Login({ onDone, onBack }) {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [err, setErr] = useState('')
+
+  async function submit(e) {
+    e.preventDefault()
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    if (error) setErr(error.message); else onDone()
+  }
+
+  return (
+    <form className="form detail" onSubmit={submit}>
+      <button type="button" className="link" onClick={onBack}>← Back</button>
+      <h2>Department login</h2>
+      <p className="muted">Only authorised departments can add or update projects. Citizens can browse and report without logging in.</p>
+      <input type="email" required placeholder="Department email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      {err && <div className="error">{err}</div>}
+      <button className="primary">Log in</button>
     </form>
   )
 }
