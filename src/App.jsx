@@ -82,6 +82,7 @@ export default function App() {
     )
   }, [projects, filter, query])
   const sel = projects.find((p) => p.id === selected)
+  const myDept = session?.user?.app_metadata?.department || ''
 
   const conflictIds = useMemo(() => {
     const ids = new Set()
@@ -107,9 +108,9 @@ export default function App() {
           <button className="chip" onClick={() => { setShowStats(true); setSelected(null); setAdding(false); setShowLogin(false) }}>Stats</button>
           {session ? (
             <>
-              <small>{session.user.email}</small>
+              <small>{session.user.email}{myDept && ' · ' + myDept}</small>
               <button className="chip" onClick={() => supabase.auth.signOut()}>Logout</button>
-              <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false); setShowStats(false) }}>+ Add project</button>
+              {myDept && <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false); setShowStats(false) }}>+ Add project</button>}
             </>
           ) : (
             <button className="primary" onClick={() => { setShowLogin(true); setSelected(null); setShowStats(false) }}>Department login</button>
@@ -129,13 +130,13 @@ export default function App() {
             ))}
           </div>
           {adding ? (
-            <AddProject projects={projects} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
+            <AddProject projects={projects} dept={myDept} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
           ) : showStats ? (
             <Stats projects={projects} reports={reports} onBack={() => setShowStats(false)} />
           ) : showLogin && !session ? (
             <Login onDone={() => setShowLogin(false)} onBack={() => setShowLogin(false)} />
           ) : sel ? (
-            <Detail canEdit={!!session} project={sel} reports={reports.filter((r) => r.project_id === sel.id)} onBack={() => setSelected(null)} onChange={load} />
+            <Detail canEdit={!!session && !!myDept && sel.department === myDept} project={sel} reports={reports.filter((r) => r.project_id === sel.id)} onBack={() => setSelected(null)} onChange={load} />
           ) : (
             <ul className="list">
               {shown.map((p) => (
@@ -229,7 +230,7 @@ function Detail({ project: p, reports, onBack, onChange, canEdit }) {
           </label>
         </>
       ) : (
-        <p className="muted">Status: <b>{p.status}</b>. Only department accounts can update it.</p>
+        <p className="muted">Status: <b>{p.status}</b>. Only {p.department} can update this project.</p>
       )}
 
       <h3>Citizen reports</h3>
@@ -255,9 +256,9 @@ function Detail({ project: p, reports, onBack, onChange, canEdit }) {
   )
 }
 
-function AddProject({ projects, onClose, onSaved }) {
+function AddProject({ projects, dept, onClose, onSaved }) {
   const [f, setF] = useState({
-    title: '', description: '', department: '', contractor: '', road: '',
+    title: '', description: '', department: dept, contractor: '', road: '',
     start_date: todayStr(), end_date: '', lat: null, lng: null,
   })
   const [err, setErr] = useState('')
@@ -273,7 +274,7 @@ function AddProject({ projects, onClose, onSaved }) {
   async function save(e) {
     e.preventDefault()
     if (!f.lat) return setErr('Click on the map to set the location.')
-    const { error } = await supabase.from('projects').insert({ ...f, status: 'planned', progress: 0 })
+    const { error } = await supabase.from('projects').insert({ ...f, department: dept, status: 'planned', progress: 0 })
     if (error) setErr(error.message); else onSaved()
   }
 
@@ -284,7 +285,7 @@ function AddProject({ projects, onClose, onSaved }) {
       <p className="muted">Click the map to place it{f.lat && ` ✔ (${f.lat.toFixed(4)}, ${f.lng.toFixed(4)})`}</p>
       <input required placeholder="Project title" value={f.title} onChange={set('title')} />
       <textarea placeholder="What is being done and why?" value={f.description} onChange={set('description')} />
-      <input required placeholder="Department" value={f.department} onChange={set('department')} />
+      <input required value={f.department} readOnly title="Your department" />
       <input placeholder="Contractor" value={f.contractor} onChange={set('contractor')} />
       <input required placeholder="Road / area" value={f.road} onChange={set('road')} />
       <label>Start <input type="date" required value={f.start_date} onChange={set('start_date')} /></label>
@@ -317,7 +318,7 @@ function Login({ onDone, onBack }) {
     <form className="form detail" onSubmit={submit}>
       <button type="button" className="link" onClick={onBack}>← Back</button>
       <h2>Department login</h2>
-      <p className="muted">Only authorised departments can add or update projects. Citizens can browse and report without logging in.</p>
+      <p className="muted">Each department can add and update only its own projects. Citizens can browse and report without logging in.</p>
       <input type="email" required placeholder="Department email" value={email} onChange={(e) => setEmail(e.target.value)} />
       <input type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
       {err && <div className="error">{err}</div>}
