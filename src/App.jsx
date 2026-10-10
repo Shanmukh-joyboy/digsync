@@ -1,8 +1,8 @@
 import { Component, useEffect, useMemo, useRef, useState } from 'react'
-import { MapContainer, TileLayer, CircleMarker, Tooltip, useMap, useMapEvents } from 'react-leaflet'
+import { MapContainer, TileLayer, Circle, CircleMarker, Tooltip, useMap, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from './supabase'
-import { conflictPairs, findConflicts } from './lib/geo'
+import { conflictPairs, findConflicts, meters } from './lib/geo'
 
 const CENTER = [12.9300, 80.1400]
 const COLORS = { planned: '#3b82f6', ongoing: '#f59e0b', stalled: '#ef4444', completed: '#22c55e' }
@@ -78,6 +78,10 @@ function AppInner() {
   const [showLogin, setShowLogin] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [query, setQuery] = useState('')
+  const [me, setMe] = useState(null)
+  const [nearOnly, setNearOnly] = useState(false)
+  const [nearKm, setNearKm] = useState(2)
+  const [locMsg, setLocMsg] = useState('')
   const hashDone = useRef(false)
 
   async function load() {
@@ -136,13 +140,38 @@ function AppInner() {
     window.history.replaceState(null, '', selected ? '#project=' + selected : window.location.pathname + window.location.search)
   }, [selected])
 
+  // Location stays in the browser. It is used only to sort and filter the list, and is never saved.
+  function locate() {
+    if (!navigator.geolocation) return setLocMsg('Your browser does not support location.')
+    setLocMsg('Finding your location…')
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setMe({ lat: pos.coords.latitude, lng: pos.coords.longitude, id: Date.now() })
+        setNearOnly(true); setSelected(null); setShowStats(false); setLocMsg('')
+      },
+      (err) => setLocMsg(err.code === 1
+        ? 'Location permission denied. Allow location for this site in your browser settings, then try again.'
+        : 'Could not get your location. Try again.'),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+    )
+  }
+
+  const dist = useMemo(() => {
+    const d = {}
+    if (me) projects.forEach((p) => { if (hasCoords(p)) d[p.id] = meters(me, { lat: Number(p.lat), lng: Number(p.lng) }) })
+    return d
+  }, [projects, me])
+
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return projects.filter((p) =>
+    let list = projects.filter((p) =>
       (filter === 'all' || (filter === 'overdue' ? isOverdue(p) : p.status === filter)) &&
       (!q || [p.title, p.road, p.department, p.contractor].some((v) => (v || '').toLowerCase().includes(q)))
     )
-  }, [projects, filter, query])
+    if (me && nearOnly) list = list.filter((p) => dist[p.id] != null && dist[p.id] <= nearKm * 1000)
+    if (me) list = [...list].sort((a, b) => (dist[a.id] ?? Infinity) - (dist[b.id] ?? Infinity))
+    return list
+  }, [projects, filter, query, me, nearOnly, nearKm, dist])
   const mappable = shown.filter(hasCoords)
   const sel = projects.find((p) => p.id === selected)
   const myDept = session?.user?.app_metadata?.department || ''
@@ -193,6 +222,19 @@ function AppInner() {
               <button key={f} className={filter === f ? 'chip on' : 'chip'} onClick={() => setFilter(f)}>{f}</button>
             ))}
           </div>
+          <div className="filters">
+            <button className="chip" onClick={locate}>📍 Near me</button>
+            {me && (
+              <>
+                <select aria-label="Search radius" style={{ width: 'auto' }} value={nearKm} onChange={(e) => setNearKm(Number(e.target.value))}>
+                  {[1, 2, 5, 10].map((k) => <option key={k} value={k}>{k} km</option>)}
+                </select>
+                <button className={nearOnly ? 'chip on' : 'chip'} onClick={() => setNearOnly(!nearOnly)}>Nearby only</button>
+                <button className="chip" onClick={() => { setMe(null); setNearOnly(false) }}>Clear</button>
+              </>
+            )}
+          </div>
+          {locMsg && <p className="muted">{locMsg}</p>}
           {adding ? (
             <AddProject projects={projects} dept={myDept} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
           ) : showStats ? (
@@ -219,7 +261,7 @@ function AppInner() {
                   <span className="dot" style={{ background: COLORS[p.status] }} />
                   <div>
                     <strong>{p.title}</strong>
-                    <small>{p.road} · {p.department}</small>
+                    <small>{p.road} · {p.department}{dist[p.id] != null && ` · ${(dist[p.id] / 1000).toFixed(1)} km away`}</small>
                     <small>{p.status}{isOverdue(p) && <em className="red"> · OVERDUE</em>} · due {p.end_date}</small>
                     {conflictIds.has(p.id) && <small style={{ color: '#7c3aed' }}>⚠ Needs coordination with nearby work</small>}
                   </div>
@@ -240,6 +282,13 @@ function AppInner() {
           />
           <Picker active={adding} />
           <FlyTo target={sel} />
+          <FlyTo target={me} />
+          {me && nearOnly && (
+            <Circle center={[me.lat, me.lng]} radius={nearKm * 1000} pathOptions={{ color: '#2563eb', weight: 1, fillOpacity: 0.05, interactive: false }} />
+          )}
+          {me && (
+            <CircleMarker center={[me.lat, me.lng]} radius={8} pathOptions={{ color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1, interactive: false }} />
+          )}
           {mappable.map((p) => (
             <CircleMarker
               key={p.id}
