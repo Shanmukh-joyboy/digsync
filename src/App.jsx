@@ -2,34 +2,18 @@ import { useEffect, useMemo, useState } from 'react'
 import { MapContainer, TileLayer, CircleMarker, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from './supabase'
+import { findConflicts } from './lib/geo'
 
 const CENTER = [12.9300, 80.1400]
 const COLORS = { planned: '#3b82f6', ongoing: '#f59e0b', stalled: '#ef4444', completed: '#22c55e' }
 const KINDS = { delay: 'Delay', poor_quality: 'Poor quality', safety: 'Safety hazard', update: 'Progress update' }
-const todayStr = () => new Date().toISOString().slice(0, 10)
+
+// Local date (not UTC), so "today" is correct in India just after midnight
+const todayStr = () => {
+  const d = new Date()
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+}
 const isOverdue = (p) => p.status !== 'completed' && p.end_date < todayStr()
-const day = 86400000
-
-function meters(a, b) {
-  const R = 6371000, rad = (x) => (x * Math.PI) / 180
-  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng)
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2
-  return 2 * R * Math.asin(Math.sqrt(h))
-}
-
-// Coordination check: another active project within 150 m and within 180 days
-function findConflicts(d, projects) {
-  if (!d.lat || !d.start_date || !d.end_date) return []
-  const s = new Date(d.start_date).getTime() - 180 * day
-  const e = new Date(d.end_date).getTime() + 180 * day
-  return projects.filter(
-    (p) =>
-      p.status !== 'completed' &&
-      meters(d, p) < 150 &&
-      new Date(p.start_date).getTime() <= e &&
-      new Date(p.end_date).getTime() >= s
-  )
-}
 
 function Picker({ active }) {
   useMapEvents({
@@ -46,19 +30,27 @@ export default function App() {
   const [filter, setFilter] = useState('all')
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
   const [session, setSession] = useState(null)
   const [showLogin, setShowLogin] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [query, setQuery] = useState('')
 
   async function load() {
-    const [p, r, v] = await Promise.all([
-      supabase.from('projects').select('*').order('created_at', { ascending: false }),
-      supabase.from('reports').select('*').order('created_at', { ascending: false }),
-      supabase.from('report_votes').select('*'),
-    ])
-    if (p.error) return setError(p.error.message)
-    setProjects(p.data); setReports(r.data || []); setVotes(v.data || [])
+    try {
+      const [p, r, v] = await Promise.all([
+        supabase.from('projects').select('*').order('created_at', { ascending: false }),
+        supabase.from('reports').select('*').order('created_at', { ascending: false }),
+        supabase.from('report_votes').select('*'),
+      ])
+      if (p.error) return setError('Could not load projects: ' + p.error.message)
+      setError(r.error ? 'Could not load reports: ' + r.error.message : '')
+      setProjects(p.data); setReports(r.data || []); setVotes(v.data || [])
+    } catch (e) {
+      setError('Network problem. Check your connection and refresh.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
@@ -164,7 +156,8 @@ export default function App() {
                   </div>
                 </li>
               ))}
-              {!shown.length && <p className="muted">No projects match.</p>}
+              {loading && <p className="muted">Loading projects…</p>}
+              {!loading && !shown.length && <p className="muted">No projects match.</p>}
             </ul>
           )}
         </aside>
@@ -189,6 +182,13 @@ export default function App() {
 function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, onBack, onChange, canEdit }) {
   const [form, setForm] = useState({ kind: 'delay', message: '' })
   const [busy, setBusy] = useState(false)
+  const [history, setHistory] = useState([])
+
+  useEffect(() => {
+    supabase.from('project_audit').select('*').eq('project_id', String(p.id))
+      .order('changed_at', { ascending: false }).limit(5)
+      .then(({ data }) => setHistory(data || []))
+  }, [p.id, p.status, p.progress])
 
   async function submit(e) {
     e.preventDefault()
@@ -211,16 +211,17 @@ function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, 
     onChange()
   }
 
-  async function setStatus(status) {
-    await supabase.from('projects').update({ status, progress: status === 'completed' ? 100 : p.progress }).eq('id', p.id)
+  // .select() matters: a write blocked by row-level security returns no error, just zero rows
+  async function updateProject(patch) {
+    const { data, error } = await supabase.from('projects').update(patch).eq('id', p.id).select()
+    if (error || !data?.length) {
+      alert('Update not saved' + (error ? ': ' + error.message : '. You may not have permission for this project.'))
+      return
+    }
     onChange()
   }
-
-  async function setProgress(v) {
-    const n = Math.min(100, Math.max(0, Number(v) || 0))
-    await supabase.from('projects').update({ progress: n }).eq('id', p.id)
-    onChange()
-  }
+  const setStatus = (status) => updateProject({ status, progress: status === 'completed' ? 100 : p.progress })
+  const setProgress = (v) => updateProject({ progress: Math.min(100, Math.max(0, Number(v) || 0)) })
 
   return (
     <div className="detail">
@@ -236,6 +237,20 @@ function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, 
       </dl>
       <div className="bar"><div style={{ width: p.progress + '%', background: COLORS[p.status] }} /></div>
       <small>{p.progress}% complete</small>
+
+      {history.length > 0 && (
+        <>
+          <h3>Update history</h3>
+          <ul className="reports">
+            {history.map((h) => (
+              <li key={h.id}>
+                <small>{new Date(h.changed_at).toLocaleString()} · {h.department}</small>
+                <p>{h.old_status} → {h.new_status} · {h.old_progress}% → {h.new_progress}%</p>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
 
       {canEdit ? (
         <>
@@ -260,7 +275,7 @@ function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, 
           <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
             {Object.entries(KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
-          <textarea placeholder="What's happening on the ground?" value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} />
+          <textarea maxLength={1000} placeholder="What's happening on the ground?" value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} />
           <small className="muted">Posting as {displayName}</small>
           <button className="primary" disabled={busy}>Submit report</button>
         </form>
@@ -301,6 +316,7 @@ function AddProject({ projects, dept, onClose, onSaved }) {
   async function save(e) {
     e.preventDefault()
     if (!f.lat) return setErr('Click on the map to set the location.')
+    if (f.end_date < f.start_date) return setErr('End date must be on or after the start date.')
     const { error } = await supabase.from('projects').insert({ ...f, department: dept, status: 'planned', progress: 0 })
     if (error) setErr(error.message); else onSaved()
   }
@@ -316,7 +332,7 @@ function AddProject({ projects, dept, onClose, onSaved }) {
       <input placeholder="Contractor" value={f.contractor} onChange={set('contractor')} />
       <input required placeholder="Road / area" value={f.road} onChange={set('road')} />
       <label>Start <input type="date" required value={f.start_date} onChange={set('start_date')} /></label>
-      <label>End <input type="date" required value={f.end_date} onChange={set('end_date')} /></label>
+      <label>End <input type="date" required min={f.start_date} value={f.end_date} onChange={set('end_date')} /></label>
       {conflicts.length > 0 && (
         <div className="warn">
           ⚠ <b>Coordination alert:</b> {conflicts.length} other project(s) within 150 m around the same time:
