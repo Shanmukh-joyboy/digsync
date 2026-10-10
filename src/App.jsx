@@ -41,7 +41,8 @@ function FlyTo({ target }) {
   const map = useMap()
   useEffect(() => {
     if (target && hasCoords(target)) {
-      map.flyTo([Number(target.lat), Number(target.lng)], Math.max(map.getZoom(), 14), { duration: 0.8 })
+      // setView is lighter than flyTo: it doesn't zoom out and back in, so far fewer tiles are requested
+      map.setView([Number(target.lat), Number(target.lng)], Math.max(map.getZoom(), 14), { animate: true, duration: 0.5 })
     }
   }, [target?.id])
   return null
@@ -230,7 +231,14 @@ function AppInner() {
           )}
         </aside>
         <MapContainer center={CENTER} zoom={11} className="map">
-          <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
+            subdomains="abcd"
+            maxZoom={19}
+            keepBuffer={4}
+            updateWhenZooming={false}
+          />
           <Picker active={adding} />
           <FlyTo target={sel} />
           {mappable.map((p) => (
