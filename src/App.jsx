@@ -3,7 +3,7 @@ import { MapContainer, TileLayer, CircleMarker, useMapEvents } from 'react-leafl
 import 'leaflet/dist/leaflet.css'
 import { supabase } from './supabase'
 
-const CENTER = [12.8406, 80.1534]
+const CENTER = [12.9300, 80.1400]
 const COLORS = { planned: '#3b82f6', ongoing: '#f59e0b', stalled: '#ef4444', completed: '#22c55e' }
 const KINDS = { delay: 'Delay', poor_quality: 'Poor quality', safety: 'Safety hazard', update: 'Progress update' }
 const todayStr = () => new Date().toISOString().slice(0, 10)
@@ -153,7 +153,7 @@ export default function App() {
             </ul>
           )}
         </aside>
-        <MapContainer center={CENTER} zoom={15} className="map">
+        <MapContainer center={CENTER} zoom={11} className="map">
           <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           <Picker active={adding} />
           {shown.map((p) => (
