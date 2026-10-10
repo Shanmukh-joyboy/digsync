@@ -107,7 +107,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>🚧 DigOnce <span>Know what's being built on your street</span></h1>
+        <h1>🚧 DigSync <span>Know what's being built on your street</span></h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button className="chip" onClick={() => { setShowStats(true); setSelected(null); setAdding(false); setShowLogin(false) }}>Stats</button>
           {session ? (
