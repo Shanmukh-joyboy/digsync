@@ -41,6 +41,7 @@ function Picker({ active }) {
 export default function App() {
   const [projects, setProjects] = useState([])
   const [reports, setReports] = useState([])
+  const [votes, setVotes] = useState([])
   const [selected, setSelected] = useState(null)
   const [filter, setFilter] = useState('all')
   const [adding, setAdding] = useState(false)
@@ -51,12 +52,13 @@ export default function App() {
   const [query, setQuery] = useState('')
 
   async function load() {
-    const [p, r] = await Promise.all([
+    const [p, r, v] = await Promise.all([
       supabase.from('projects').select('*').order('created_at', { ascending: false }),
       supabase.from('reports').select('*').order('created_at', { ascending: false }),
+      supabase.from('report_votes').select('*'),
     ])
     if (p.error) return setError(p.error.message)
-    setProjects(p.data); setReports(r.data || [])
+    setProjects(p.data); setReports(r.data || []); setVotes(v.data || [])
   }
 
   useEffect(() => {
@@ -83,6 +85,8 @@ export default function App() {
   }, [projects, filter, query])
   const sel = projects.find((p) => p.id === selected)
   const myDept = session?.user?.app_metadata?.department || ''
+  const userId = session?.user?.id || null
+  const displayName = session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || ''
 
   const conflictIds = useMemo(() => {
     const ids = new Set()
@@ -108,12 +112,12 @@ export default function App() {
           <button className="chip" onClick={() => { setShowStats(true); setSelected(null); setAdding(false); setShowLogin(false) }}>Stats</button>
           {session ? (
             <>
-              <small>{session.user.email}{myDept && ' · ' + myDept}</small>
+              <small>{displayName} · {myDept || 'Citizen'}</small>
               <button className="chip" onClick={() => supabase.auth.signOut()}>Logout</button>
               {myDept && <button className="primary" onClick={() => { setAdding(true); setSelected(null); setShowLogin(false); setShowStats(false) }}>+ Add project</button>}
             </>
           ) : (
-            <button className="primary" onClick={() => { setShowLogin(true); setSelected(null); setShowStats(false) }}>Department login</button>
+            <button className="primary" onClick={() => { setShowLogin(true); setShowStats(false); setAdding(false) }}>Log in / Sign up</button>
           )}
         </div>
       </header>
@@ -136,7 +140,17 @@ export default function App() {
           ) : showLogin && !session ? (
             <Login onDone={() => setShowLogin(false)} onBack={() => setShowLogin(false)} />
           ) : sel ? (
-            <Detail canEdit={!!session && !!myDept && sel.department === myDept} project={sel} reports={reports.filter((r) => r.project_id === sel.id)} onBack={() => setSelected(null)} onChange={load} />
+            <Detail
+              canEdit={!!session && !!myDept && sel.department === myDept}
+              project={sel}
+              reports={reports.filter((r) => r.project_id === sel.id)}
+              votes={votes}
+              userId={userId}
+              displayName={displayName}
+              onNeedLogin={() => setShowLogin(true)}
+              onBack={() => setSelected(null)}
+              onChange={load}
+            />
           ) : (
             <ul className="list">
               {shown.map((p) => (
@@ -172,21 +186,28 @@ export default function App() {
   )
 }
 
-function Detail({ project: p, reports, onBack, onChange, canEdit }) {
-  const [form, setForm] = useState({ kind: 'delay', message: '', author: '' })
+function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, onBack, onChange, canEdit }) {
+  const [form, setForm] = useState({ kind: 'delay', message: '' })
   const [busy, setBusy] = useState(false)
 
   async function submit(e) {
     e.preventDefault()
     if (!form.message.trim()) return
     setBusy(true)
-    const { error } = await supabase.from('reports').insert({ project_id: p.id, ...form })
+    const { error } = await supabase.from('reports').insert({ project_id: p.id, kind: form.kind, message: form.message, author: displayName })
     if (error) { setBusy(false); alert('Could not submit report: ' + error.message); return }
-    setForm({ kind: 'delay', message: '', author: '' }); setBusy(false); onChange()
+    setForm({ kind: 'delay', message: '' }); setBusy(false); onChange()
   }
 
-  async function affected(r) {
-    await supabase.from('reports').update({ affected: r.affected + 1 }).eq('id', r.id)
+  const countFor = (r) => votes.filter((v) => String(v.report_id) === String(r.id)).length
+  const votedBy = (r) => votes.some((v) => String(v.report_id) === String(r.id) && v.user_id === userId)
+
+  async function toggleVote(r) {
+    if (!userId) return onNeedLogin()
+    const { error } = votedBy(r)
+      ? await supabase.from('report_votes').delete().eq('report_id', String(r.id)).eq('user_id', userId)
+      : await supabase.from('report_votes').insert({ report_id: String(r.id), user_id: userId })
+    if (error) alert('Could not save: ' + error.message)
     onChange()
   }
 
@@ -234,20 +255,26 @@ function Detail({ project: p, reports, onBack, onChange, canEdit }) {
       )}
 
       <h3>Citizen reports</h3>
-      <form onSubmit={submit} className="form">
-        <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
-          {Object.entries(KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-        <textarea placeholder="What's happening on the ground?" value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} />
-        <input placeholder="Your name (optional)" value={form.author} onChange={(e) => setForm({ ...form, author: e.target.value })} />
-        <button className="primary" disabled={busy}>Submit report</button>
-      </form>
+      {userId ? (
+        <form onSubmit={submit} className="form">
+          <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })}>
+            {Object.entries(KINDS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </select>
+          <textarea placeholder="What's happening on the ground?" value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} />
+          <small className="muted">Posting as {displayName}</small>
+          <button className="primary" disabled={busy}>Submit report</button>
+        </form>
+      ) : (
+        <p className="muted">
+          <button className="link" onClick={onNeedLogin}>Log in or sign up</button> as a citizen to file a report or confirm one.
+        </p>
+      )}
       <ul className="reports">
         {reports.map((r) => (
           <li key={r.id}>
             <b>{KINDS[r.kind]}</b> <small>{new Date(r.created_at).toLocaleDateString()} · {r.author || 'Anonymous'}</small>
             <p>{r.message}</p>
-            <button className="chip" onClick={() => affected(r)}>👍 Affects me too ({r.affected})</button>
+            <button className={votedBy(r) ? 'chip on' : 'chip'} onClick={() => toggleVote(r)}>👍 Affects me too ({countFor(r)})</button>
           </li>
         ))}
         {!reports.length && <p className="muted">No reports yet.</p>}
@@ -304,25 +331,54 @@ function AddProject({ projects, dept, onClose, onSaved }) {
 }
 
 function Login({ onDone, onBack }) {
+  const [role, setRole] = useState('citizen')
+  const [mode, setMode] = useState('login')
+  const [name, setName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const signup = role === 'citizen' && mode === 'signup'
 
   async function submit(e) {
     e.preventDefault()
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) setErr(error.message); else onDone()
+    setErr(''); setBusy(true)
+    const res = signup
+      ? await supabase.auth.signUp({ email, password, options: { data: { full_name: name } } })
+      : await supabase.auth.signInWithPassword({ email, password })
+    setBusy(false)
+    if (res.error) return setErr(res.error.message)
+    if (role === 'department' && !res.data.user?.app_metadata?.department) {
+      await supabase.auth.signOut()
+      return setErr('This account is not a department account.')
+    }
+    if (signup && !res.data.session) return setErr('Account created. Check your email to confirm, then log in.')
+    onDone()
   }
 
   return (
     <form className="form detail" onSubmit={submit}>
       <button type="button" className="link" onClick={onBack}>← Back</button>
-      <h2>Department login</h2>
-      <p className="muted">Each department can add and update only its own projects. Citizens can browse and report without logging in.</p>
-      <input type="email" required placeholder="Department email" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <input type="password" required placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      <h2>{signup ? 'Create citizen account' : 'Log in'}</h2>
+      <div className="filters">
+        <button type="button" className={role === 'citizen' ? 'chip on' : 'chip'} onClick={() => { setRole('citizen'); setErr('') }}>Citizen</button>
+        <button type="button" className={role === 'department' ? 'chip on' : 'chip'} onClick={() => { setRole('department'); setMode('login'); setErr('') }}>Department</button>
+      </div>
+      <p className="muted">
+        {role === 'citizen'
+          ? 'Citizens can file reports and confirm others. Everyone can browse without an account.'
+          : 'Department accounts are issued by the administrator. Each can add and update only its own projects.'}
+      </p>
+      {signup && <input required placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />}
+      <input type="email" required placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input type="password" required minLength={6} placeholder="Password (min 6 characters)" value={password} onChange={(e) => setPassword(e.target.value)} />
       {err && <div className="error">{err}</div>}
-      <button className="primary">Log in</button>
+      <button className="primary" disabled={busy}>{signup ? 'Sign up' : 'Log in'}</button>
+      {role === 'citizen' && (
+        <button type="button" className="link" onClick={() => { setMode(signup ? 'login' : 'signup'); setErr('') }}>
+          {signup ? 'Already have an account? Log in' : 'New here? Create a citizen account'}
+        </button>
+      )}
     </form>
   )
 }
