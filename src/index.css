@@ -113,3 +113,34 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+@media (max-width: 800px) {
+  .main {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+
+  .main aside {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: 45vh;
+    overflow-y: auto;
+    order: 2;
+  }
+
+  .main .map {
+    width: 100% !important;
+    height: 50vh !important;
+    min-height: 280px;
+    order: 1;
+  }
+
+  header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  header h1 span {
+    display: none;
+  }
+}

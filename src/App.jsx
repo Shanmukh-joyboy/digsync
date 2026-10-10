@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react'
-import { MapContainer, TileLayer, CircleMarker, useMapEvents } from 'react-leaflet'
+import { Component, useEffect, useMemo, useRef, useState } from 'react'
+import { MapContainer, TileLayer, CircleMarker, Tooltip, useMap, useMapEvents } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import { supabase } from './supabase'
-import { findConflicts } from './lib/geo'
+import { conflictPairs, findConflicts } from './lib/geo'
 
 const CENTER = [12.9300, 80.1400]
 const COLORS = { planned: '#3b82f6', ongoing: '#f59e0b', stalled: '#ef4444', completed: '#22c55e' }
@@ -14,6 +14,21 @@ const todayStr = () => {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
 }
 const isOverdue = (p) => p.status !== 'completed' && p.end_date < todayStr()
+const hasCoords = (p) => Number.isFinite(Number(p.lat)) && Number.isFinite(Number(p.lng))
+
+// A render error should never leave the user with a blank white page
+class ErrorBoundary extends Component {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(e) { console.error(e) }
+  render() {
+    return this.state.failed ? (
+      <div className="error" style={{ margin: 16 }}>
+        Something went wrong. <button onClick={() => window.location.reload()}>Reload the page</button>
+      </div>
+    ) : this.props.children
+  }
+}
 
 function Picker({ active }) {
   useMapEvents({
@@ -22,30 +37,59 @@ function Picker({ active }) {
   return null
 }
 
-export default function App() {
+function FlyTo({ target }) {
+  const map = useMap()
+  useEffect(() => {
+    if (target && hasCoords(target)) {
+      map.flyTo([Number(target.lat), Number(target.lng)], Math.max(map.getZoom(), 14), { duration: 0.8 })
+    }
+  }, [target?.id])
+  return null
+}
+
+const dot = (bg) => ({ display: 'inline-block', width: 10, height: 10, borderRadius: '50%', background: bg, marginRight: 6 })
+const ring = (c) => ({ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', border: `3px solid ${c}`, marginRight: 6 })
+
+function Legend() {
+  return (
+    <div style={{ position: 'absolute', bottom: 16, left: 10, zIndex: 1000, background: 'rgba(255,255,255,0.95)', color: '#111', padding: '8px 10px', borderRadius: 8, fontSize: 12, lineHeight: 1.6, maxWidth: 230, boxShadow: '0 1px 4px rgba(0,0,0,.3)', pointerEvents: 'none' }}>
+      <b>Legend</b>
+      {Object.entries(COLORS).map(([s, c]) => <div key={s}><span style={dot(c)} />{s}</div>)}
+      <div><span style={ring('#991b1b')} />overdue</div>
+      <div><span style={ring('#7c3aed')} />needs coordination</div>
+      <div style={{ marginTop: 4, opacity: 0.7 }}>Data: public reports, Oct 2026. Dates and locations are indicative.</div>
+    </div>
+  )
+}
+
+function AppInner() {
   const [projects, setProjects] = useState([])
   const [reports, setReports] = useState([])
   const [votes, setVotes] = useState([])
+  const [replies, setReplies] = useState([])
   const [selected, setSelected] = useState(null)
   const [filter, setFilter] = useState('all')
   const [adding, setAdding] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [online, setOnline] = useState(navigator.onLine)
   const [session, setSession] = useState(null)
   const [showLogin, setShowLogin] = useState(false)
   const [showStats, setShowStats] = useState(false)
   const [query, setQuery] = useState('')
+  const hashDone = useRef(false)
 
   async function load() {
     try {
-      const [p, r, v] = await Promise.all([
+      const [p, r, v, rp] = await Promise.all([
         supabase.from('projects').select('*').order('created_at', { ascending: false }),
         supabase.from('reports').select('*').order('created_at', { ascending: false }),
         supabase.from('report_votes').select('*'),
+        supabase.from('report_replies').select('*').order('created_at', { ascending: true }),
       ])
       if (p.error) return setError('Could not load projects: ' + p.error.message)
       setError(r.error ? 'Could not load reports: ' + r.error.message : '')
-      setProjects(p.data); setReports(r.data || []); setVotes(v.data || [])
+      setProjects(p.data); setReports(r.data || []); setVotes(v.data || []); setReplies(rp.data || [])
     } catch (e) {
       setError('Network problem. Check your connection and refresh.')
     } finally {
@@ -59,14 +103,37 @@ export default function App() {
     return () => sub.subscription.unsubscribe()
   }, [])
 
+  // Realtime: a burst of changes triggers one reload, not one per change
   useEffect(() => {
     load()
-    const ch = supabase
-      .channel('live')
-      .on('postgres_changes', { event: '*', schema: 'public' }, load)
-      .subscribe()
-    return () => supabase.removeChannel(ch)
+    let timer
+    const refresh = () => { clearTimeout(timer); timer = setTimeout(load, 400) }
+    const ch = supabase.channel('live').on('postgres_changes', { event: '*', schema: 'public' }, refresh).subscribe()
+    return () => { clearTimeout(timer); supabase.removeChannel(ch) }
   }, [])
+
+  useEffect(() => {
+    const on = () => { setOnline(true); load() }
+    const off = () => setOnline(false)
+    window.addEventListener('online', on); window.addEventListener('offline', off)
+    return () => { window.removeEventListener('online', on); window.removeEventListener('offline', off) }
+  }, [])
+
+  // Shareable links: #project=<id> opens that project
+  useEffect(() => {
+    if (hashDone.current || !projects.length) return
+    hashDone.current = true
+    const m = window.location.hash.match(/project=([^&]+)/)
+    if (m) {
+      const p = projects.find((x) => String(x.id) === decodeURIComponent(m[1]))
+      if (p) setSelected(p.id)
+    }
+  }, [projects])
+
+  useEffect(() => {
+    if (!hashDone.current) return
+    window.history.replaceState(null, '', selected ? '#project=' + selected : window.location.pathname + window.location.search)
+  }, [selected])
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -75,19 +142,18 @@ export default function App() {
       (!q || [p.title, p.road, p.department, p.contractor].some((v) => (v || '').toLowerCase().includes(q)))
     )
   }, [projects, filter, query])
+  const mappable = shown.filter(hasCoords)
   const sel = projects.find((p) => p.id === selected)
   const myDept = session?.user?.app_metadata?.department || ''
   const userId = session?.user?.id || null
   const displayName = session?.user?.user_metadata?.full_name || session?.user?.email?.split('@')[0] || ''
 
+  const pairs = useMemo(() => conflictPairs(projects), [projects])
   const conflictIds = useMemo(() => {
     const ids = new Set()
-    projects.forEach((a) => {
-      if (a.status === 'completed') return
-      findConflicts(a, projects.filter((b) => b.id !== a.id)).forEach((b) => { ids.add(a.id); ids.add(b.id) })
-    })
+    pairs.forEach(([a, b]) => { ids.add(a.id); ids.add(b.id) })
     return ids
-  }, [projects])
+  }, [pairs])
 
   const stats = {
     total: projects.length,
@@ -116,10 +182,11 @@ export default function App() {
       <div className="stats">
         <b>{stats.total}</b> projects · <b>{stats.ongoing}</b> ongoing · <b className="red">{stats.overdue}</b> overdue · <b>{stats.reports}</b> citizen reports
       </div>
+      {!online && <div className="error">You are offline. Showing the last loaded data, and changes can't be saved.</div>}
       {error && <div className="error">{error}</div>}
       <div className="main">
         <aside>
-          <input style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }} placeholder="Search title, road, department…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <input aria-label="Search projects" style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }} placeholder="Search title, road, department…" value={query} onChange={(e) => setQuery(e.target.value)} />
           <div className="filters">
             {['all', 'planned', 'ongoing', 'stalled', 'completed', 'overdue'].map((f) => (
               <button key={f} className={filter === f ? 'chip on' : 'chip'} onClick={() => setFilter(f)}>{f}</button>
@@ -128,7 +195,7 @@ export default function App() {
           {adding ? (
             <AddProject projects={projects} dept={myDept} onClose={() => setAdding(false)} onSaved={() => { setAdding(false); load() }} />
           ) : showStats ? (
-            <Stats projects={projects} reports={reports} onBack={() => setShowStats(false)} />
+            <Stats projects={projects} reports={reports} replies={replies} pairs={pairs} onBack={() => setShowStats(false)} />
           ) : showLogin && !session ? (
             <Login onDone={() => setShowLogin(false)} onBack={() => setShowLogin(false)} />
           ) : sel ? (
@@ -136,6 +203,7 @@ export default function App() {
               canEdit={!!session && !!myDept && sel.department === myDept}
               project={sel}
               reports={reports.filter((r) => r.project_id === sel.id)}
+              replies={replies}
               votes={votes}
               userId={userId}
               displayName={displayName}
@@ -146,7 +214,7 @@ export default function App() {
           ) : (
             <ul className="list">
               {shown.map((p) => (
-                <li key={p.id} onClick={() => setSelected(p.id)}>
+                <li key={p.id} tabIndex={0} role="button" onClick={() => setSelected(p.id)} onKeyDown={(e) => { if (e.key === 'Enter') setSelected(p.id) }}>
                   <span className="dot" style={{ background: COLORS[p.status] }} />
                   <div>
                     <strong>{p.title}</strong>
@@ -164,31 +232,74 @@ export default function App() {
         <MapContainer center={CENTER} zoom={11} className="map">
           <TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           <Picker active={adding} />
-          {shown.map((p) => (
+          <FlyTo target={sel} />
+          {mappable.map((p) => (
             <CircleMarker
               key={p.id}
-              center={[p.lat, p.lng]}
+              center={[Number(p.lat), Number(p.lng)]}
               radius={selected === p.id ? 14 : 10}
               pathOptions={{ color: isOverdue(p) ? '#991b1b' : conflictIds.has(p.id) ? '#7c3aed' : '#fff', weight: 3, fillColor: COLORS[p.status], fillOpacity: 0.95 }}
               eventHandlers={{ click: () => { setSelected(p.id); setAdding(false); setShowStats(false) } }}
-            />
+            >
+              <Tooltip>{p.title}</Tooltip>
+            </CircleMarker>
           ))}
+          <Legend />
         </MapContainer>
       </div>
     </div>
   )
 }
 
-function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, onBack, onChange, canEdit }) {
+export default function App() {
+  return <ErrorBoundary><AppInner /></ErrorBoundary>
+}
+
+function ReplyBox({ report, project, onDone }) {
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function send(e) {
+    e.preventDefault()
+    if (!text.trim()) return
+    setBusy(true)
+    const { error } = await supabase.from('report_replies').insert({
+      report_id: String(report.id), project_id: String(project.id), department: project.department, message: text.trim(),
+    })
+    setBusy(false)
+    if (error) return alert('Could not post reply: ' + error.message)
+    setText(''); onDone()
+  }
+
+  return (
+    <form onSubmit={send} className="form">
+      <input maxLength={500} placeholder={`Official reply from ${project.department}…`} value={text} onChange={(e) => setText(e.target.value)} />
+      <button className="chip" disabled={busy}>Post reply</button>
+    </form>
+  )
+}
+
+function Detail({ project: p, reports, replies, votes, userId, displayName, onNeedLogin, onBack, onChange, canEdit }) {
   const [form, setForm] = useState({ kind: 'delay', message: '' })
   const [busy, setBusy] = useState(false)
   const [history, setHistory] = useState([])
+  const [copied, setCopied] = useState(false)
 
   useEffect(() => {
     supabase.from('project_audit').select('*').eq('project_id', String(p.id))
       .order('changed_at', { ascending: false }).limit(5)
       .then(({ data }) => setHistory(data || []))
   }, [p.id, p.status, p.progress])
+
+  async function copyLink() {
+    const url = window.location.origin + window.location.pathname + '#project=' + p.id
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopied(true); setTimeout(() => setCopied(false), 2000)
+    } catch {
+      window.prompt('Copy this link:', url)
+    }
+  }
 
   async function submit(e) {
     e.preventDefault()
@@ -225,7 +336,10 @@ function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, 
 
   return (
     <div className="detail">
-      <button className="link" onClick={onBack}>← All projects</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <button className="link" onClick={onBack}>← All projects</button>
+        <button className="chip" onClick={copyLink}>{copied ? 'Link copied ✔' : '🔗 Share link'}</button>
+      </div>
       <h2>{p.title}</h2>
       {isOverdue(p) && <div className="warn">⚠ Deadline passed on {p.end_date}. {reports.length} citizen report(s) filed.</div>}
       <p>{p.description}</p>
@@ -290,6 +404,13 @@ function Detail({ project: p, reports, votes, userId, displayName, onNeedLogin, 
             <b>{KINDS[r.kind]}</b> <small>{new Date(r.created_at).toLocaleDateString()} · {r.author || 'Anonymous'}</small>
             <p>{r.message}</p>
             <button className={votedBy(r) ? 'chip on' : 'chip'} onClick={() => toggleVote(r)}>👍 Affects me too ({countFor(r)})</button>
+            {replies.filter((x) => String(x.report_id) === String(r.id)).map((x) => (
+              <p key={x.id} style={{ background: '#eff6ff', color: '#111', borderLeft: '3px solid #2563eb', padding: '6px 8px', margin: '6px 0' }}>
+                <b>Official reply · {x.department}</b> <small>{new Date(x.created_at).toLocaleDateString()}</small><br />
+                {x.message}
+              </p>
+            ))}
+            {canEdit && <ReplyBox report={r} project={p} onDone={onChange} />}
           </li>
         ))}
         {!reports.length && <p className="muted">No reports yet.</p>}
@@ -399,10 +520,10 @@ function Login({ onDone, onBack }) {
   )
 }
 
-function Bar({ label, value, max }) {
+function Bar({ label, value, max, plain }) {
   return (
     <div style={{ margin: '6px 0' }}>
-      <small>{label} ({value})</small>
+      <small>{label}{plain ? '' : ` (${value})`}</small>
       <div style={{ background: '#e5e7eb', borderRadius: 4, height: 10 }}>
         <div style={{ width: `${max ? (value / max) * 100 : 0}%`, background: '#2563eb', height: 10, borderRadius: 4 }} />
       </div>
@@ -410,7 +531,23 @@ function Bar({ label, value, max }) {
   )
 }
 
-function Stats({ projects, reports, onBack }) {
+// Open data: anyone can download the project list. Text cells starting with = + - @ are
+// prefixed so a spreadsheet never runs them as formulas.
+function downloadCsv(projects) {
+  const cols = ['title', 'department', 'contractor', 'road', 'status', 'progress', 'start_date', 'end_date', 'lat', 'lng']
+  const esc = (v) => {
+    let s = String(v ?? '')
+    if (typeof v === 'string' && /^[=+\-@]/.test(s)) s = "'" + s
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s
+  }
+  const csv = [cols.join(','), ...projects.map((p) => cols.map((c) => esc(p[c])).join(','))].join('\n')
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }))
+  const a = document.createElement('a')
+  a.href = url; a.download = 'digsync-projects.csv'; a.click()
+  URL.revokeObjectURL(url)
+}
+
+function Stats({ projects, reports, replies, pairs, onBack }) {
   const overdue = projects.filter(isOverdue)
 
   const byDept = {}
@@ -433,30 +570,34 @@ function Stats({ projects, reports, onBack }) {
   const byKind = {}
   reports.forEach((r) => { byKind[r.kind] = (byKind[r.kind] || 0) + 1 })
 
-  // Coordination conflicts: same rule as the Add-project alert, each pair counted once
-  const conflicts = []
-  projects.forEach((a) => {
-    if (a.status === 'completed') return
-    findConflicts(a, projects.filter((b) => b.id !== a.id)).forEach((b) => {
-      if (String(a.id) < String(b.id)) conflicts.push([a, b])
-    })
+  // Department responsiveness: share of citizen reports that received an official reply
+  const deptOf = {}
+  projects.forEach((p) => { deptOf[p.id] = p.department })
+  const repliedIds = new Set(replies.map((x) => String(x.report_id)))
+  const resp = {}
+  reports.forEach((r) => {
+    const d = deptOf[r.project_id] || 'Unassigned'
+    resp[d] = resp[d] || { total: 0, replied: 0 }
+    resp[d].total++
+    if (repliedIds.has(String(r.id))) resp[d].replied++
   })
 
   return (
     <div className="detail">
       <button type="button" className="link" onClick={onBack}>← Back</button>
       <h2>City stats</h2>
+      <button className="chip" onClick={() => downloadCsv(projects)}>⬇ Download projects (CSV)</button>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '12px 0' }}>
         <div><b style={{ fontSize: 24 }}>{projects.length}</b><br /><small>Projects</small></div>
         <div><b style={{ fontSize: 24 }}>{overdue.length}</b><br /><small>Overdue</small></div>
         <div><b style={{ fontSize: 24 }}>{avg}%</b><br /><small>Avg progress</small></div>
-        <div><b style={{ fontSize: 24 }}>{conflicts.length}</b><br /><small>Coordination conflicts</small></div>
+        <div><b style={{ fontSize: 24 }}>{pairs.length}</b><br /><small>Coordination conflicts</small></div>
       </div>
 
       <h3>Conflicts to coordinate</h3>
-      {conflicts.length === 0 && <p className="muted">No overlapping work found.</p>}
-      {conflicts.map(([a, b]) => (
+      {pairs.length === 0 && <p className="muted">No overlapping work found.</p>}
+      {pairs.map(([a, b]) => (
         <p key={a.id + '-' + b.id} style={{ margin: '6px 0' }}>
           <b>{a.title}</b> ({a.department}) and <b>{b.title}</b> ({b.department}) are within 150 m with overlapping dates.
         </p>
@@ -471,6 +612,12 @@ function Stats({ projects, reports, onBack }) {
       {Object.keys(byDept).length === 0 && <p className="muted">No overdue projects.</p>}
       {Object.entries(byDept).map(([d, n]) => (
         <Bar key={d} label={d} value={n} max={Math.max(...Object.values(byDept))} />
+      ))}
+
+      <h3>Department responsiveness</h3>
+      {Object.keys(resp).length === 0 && <p className="muted">No citizen reports yet.</p>}
+      {Object.entries(resp).map(([d, v]) => (
+        <Bar key={d} plain label={`${d}: ${v.replied} of ${v.total} reports answered`} value={v.replied} max={v.total} />
       ))}
 
       <h3>Most-reported projects</h3>
