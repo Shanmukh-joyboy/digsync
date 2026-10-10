@@ -48,6 +48,7 @@ export default function App() {
   const [session, setSession] = useState(null)
   const [showLogin, setShowLogin] = useState(false)
   const [showStats, setShowStats] = useState(false)
+  const [query, setQuery] = useState('')
 
   async function load() {
     const [p, r] = await Promise.all([
@@ -73,8 +74,24 @@ export default function App() {
     return () => supabase.removeChannel(ch)
   }, [])
 
-  const shown = useMemo(() => projects.filter((p) => filter === 'all' || (filter === 'overdue' ? isOverdue(p) : p.status === filter)), [projects, filter])
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return projects.filter((p) =>
+      (filter === 'all' || (filter === 'overdue' ? isOverdue(p) : p.status === filter)) &&
+      (!q || [p.title, p.road, p.department, p.contractor].some((v) => (v || '').toLowerCase().includes(q)))
+    )
+  }, [projects, filter, query])
   const sel = projects.find((p) => p.id === selected)
+
+  const conflictIds = useMemo(() => {
+    const ids = new Set()
+    projects.forEach((a) => {
+      if (a.status === 'completed') return
+      findConflicts(a, projects.filter((b) => b.id !== a.id)).forEach((b) => { ids.add(a.id); ids.add(b.id) })
+    })
+    return ids
+  }, [projects])
+
   const stats = {
     total: projects.length,
     ongoing: projects.filter((p) => p.status === 'ongoing').length,
@@ -105,6 +122,7 @@ export default function App() {
       {error && <div className="error">{error}</div>}
       <div className="main">
         <aside>
+          <input style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }} placeholder="Search title, road, department…" value={query} onChange={(e) => setQuery(e.target.value)} />
           <div className="filters">
             {['all', 'planned', 'ongoing', 'stalled', 'completed', 'overdue'].map((f) => (
               <button key={f} className={filter === f ? 'chip on' : 'chip'} onClick={() => setFilter(f)}>{f}</button>
@@ -127,6 +145,7 @@ export default function App() {
                     <strong>{p.title}</strong>
                     <small>{p.road} · {p.department}</small>
                     <small>{p.status}{isOverdue(p) && <em className="red"> · OVERDUE</em>} · due {p.end_date}</small>
+                    {conflictIds.has(p.id) && <small style={{ color: '#7c3aed' }}>⚠ Needs coordination with nearby work</small>}
                   </div>
                 </li>
               ))}
@@ -142,7 +161,7 @@ export default function App() {
               key={p.id}
               center={[p.lat, p.lng]}
               radius={selected === p.id ? 14 : 10}
-              pathOptions={{ color: isOverdue(p) ? '#991b1b' : '#fff', weight: 3, fillColor: COLORS[p.status], fillOpacity: 0.95 }}
+              pathOptions={{ color: isOverdue(p) ? '#991b1b' : conflictIds.has(p.id) ? '#7c3aed' : '#fff', weight: 3, fillColor: COLORS[p.status], fillOpacity: 0.95 }}
               eventHandlers={{ click: () => { setSelected(p.id); setAdding(false); setShowStats(false) } }}
             />
           ))}
@@ -160,7 +179,8 @@ function Detail({ project: p, reports, onBack, onChange, canEdit }) {
     e.preventDefault()
     if (!form.message.trim()) return
     setBusy(true)
-    await supabase.from('reports').insert({ project_id: p.id, ...form })
+    const { error } = await supabase.from('reports').insert({ project_id: p.id, ...form })
+    if (error) { setBusy(false); alert('Could not submit report: ' + error.message); return }
     setForm({ kind: 'delay', message: '', author: '' }); setBusy(false); onChange()
   }
 
@@ -335,6 +355,11 @@ function Stats({ projects, reports, onBack }) {
     ? Math.round(projects.reduce((s, p) => s + (Number(p.progress) || 0), 0) / projects.length)
     : 0
 
+  const byStatus = {}
+  projects.forEach((p) => { byStatus[p.status] = (byStatus[p.status] || 0) + 1 })
+  const byKind = {}
+  reports.forEach((r) => { byKind[r.kind] = (byKind[r.kind] || 0) + 1 })
+
   // Coordination conflicts: same rule as the Add-project alert, each pair counted once
   const conflicts = []
   projects.forEach((a) => {
@@ -364,6 +389,11 @@ function Stats({ projects, reports, onBack }) {
         </p>
       ))}
 
+      <h3>Projects by status</h3>
+      {Object.entries(byStatus).map(([s, n]) => (
+        <Bar key={s} label={s} value={n} max={projects.length} />
+      ))}
+
       <h3>Overdue by department</h3>
       {Object.keys(byDept).length === 0 && <p className="muted">No overdue projects.</p>}
       {Object.entries(byDept).map(([d, n]) => (
@@ -374,6 +404,12 @@ function Stats({ projects, reports, onBack }) {
       {topReported.length === 0 && <p className="muted">No citizen reports yet.</p>}
       {topReported.map(({ p, n }) => (
         <Bar key={p.id} label={p.title} value={n} max={topReported[0].n} />
+      ))}
+
+      <h3>Citizen reports by type</h3>
+      {Object.keys(byKind).length === 0 && <p className="muted">No citizen reports yet.</p>}
+      {Object.entries(byKind).map(([k, n]) => (
+        <Bar key={k} label={KINDS[k] || k} value={n} max={Math.max(...Object.values(byKind))} />
       ))}
     </div>
   )
